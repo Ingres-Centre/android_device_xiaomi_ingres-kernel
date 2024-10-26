@@ -1,212 +1,235 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+/* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
 /*
- *  Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
  */
 
-#ifndef _MEM_BUF_H
-#define _MEM_BUF_H
+#ifndef _LINUX_MEM_BUF_H
+#define _LINUX_MEM_BUF_H
 
-#include <linux/err.h>
-#include <linux/errno.h>
-#include <linux/gunyah/gh_rm_drv.h>
+#include <linux/ioctl.h>
 #include <linux/types.h>
-#include <linux/dma-buf.h>
-#include <uapi/linux/mem-buf.h>
+
+#define MEM_BUF_IOC_MAGIC 'M'
 
 /**
- * Private definitions; they are just here since the tracepoint logic needs
- * these definitions. Drivers should not use these.
+ * enum mem_buf_mem_type: Types of memory that can be allocated from and to
+ * @MEM_BUF_ION_MEM_TYPE: The memory for the source or destination is ION memory
  */
+enum mem_buf_mem_type {
+	MEM_BUF_ION_MEM_TYPE,
+	MEM_BUF_MAX_MEM_TYPE,
+};
+#define MEM_BUF_DMAHEAP_MEM_TYPE (MEM_BUF_ION_MEM_TYPE + 1)
+
+/* The mem-buf values that represent VMIDs for an ACL. */
+#define MEM_BUF_VMID_PRIMARY_VM 0
+#define	MEM_BUF_VMID_TRUSTED_VM 1
+
+#define MEM_BUF_PERM_FLAG_READ (1U << 0)
+#define MEM_BUF_PERM_FLAG_WRITE (1U << 1)
+#define MEM_BUF_PERM_FLAG_EXEC (1U << 2)
+#define MEM_BUF_PERM_VALID_FLAGS\
+	(MEM_BUF_PERM_FLAG_READ | MEM_BUF_PERM_FLAG_WRITE |\
+	 MEM_BUF_PERM_FLAG_EXEC)
+
+#define MEM_BUF_MAX_NR_ACL_ENTS 16
 
 /**
- * enum mem_buf_msg_type: Message types used by the membuf driver for
- * communication.
- * @MEM_BUF_ALLOC_REQ: The message is an allocation request from another VM to
- * the receiving VM
- * @MEM_BUF_ALLOC_RESP: The message is a response from a remote VM to an
- * allocation request issued by the receiving VM
- * @MEM_BUF_ALLOC_RELINQUISH: The message is a notification from another VM
- * that the receiving VM can reclaim the memory.
+ * struct acl_entry: Represents the access control permissions for a VMID.
+ * @vmid: The mem-buf VMID specifier associated with the VMID that will access
+ * the memory.
+ * @perms: The access permissions for the VMID in @vmid. This flag is
+ * interpreted as a bitmap, and thus, should be a combination of one or more
+ * of the MEM_BUF_PERM_FLAG_* flags.
  */
-enum mem_buf_msg_type {
-	MEM_BUF_ALLOC_REQ,
-	MEM_BUF_ALLOC_RESP,
-	MEM_BUF_ALLOC_RELINQUISH,
-	MEM_BUF_ALLOC_REQ_MAX,
+struct acl_entry {
+	__u32 vmid;
+	__u32 perms;
 };
 
 /**
- * struct mem_buf_msg_hdr: The header for all membuf messages
- * @txn_id: The transaction ID for the message. This field is only meaningful
- * for request/response type of messages.
- * @msg_type: The type of message.
+ * struct mem_buf_ion_data: Data that is unique to memory that is of type
+ * MEM_BUF_ION_MEM_TYPE.
+ * @heap_id: The heap ID of where memory should be allocated from or added to.
  */
-struct mem_buf_msg_hdr {
-	u32 txn_id;
-	u32 msg_type;
-} __packed;
+struct mem_buf_ion_data {
+	__u32 heap_id;
+};
+
+#define MEM_BUF_MAX_DMAHEAP_NAME_LEN 128
+/**
+ * struct mem_buf_dmaheap_data: Data that is unique to memory that is of type
+ * MEM_BUF_DMAHEAP_MEM_TYPE.
+ * @heap_name: array of characters containing the heap name.
+ */
+struct mem_buf_dmaheap_data {
+	__u64 heap_name;
+};
 
 /**
- * struct mem_buf_alloc_req: The message format for a memory allocation request
- * to another VM.
- * @hdr: Message header
- * @size: The size of the memory allocation to be performed on the remote VM.
- * @src_mem_type: The type of memory that the remote VM should allocate.
- * @acl_desc: A GH ACL descriptor that describes the VMIDs that will be
- * accessing the memory, as well as what permissions each VMID will have.
+ * struct mem_buf_alloc_ioctl_arg: A request to allocate memory from another
+ * VM to other VMs.
+ * @size: The size of the allocation.
+ * @acl_list: An array of structures, where each structure specifies a VMID
+ * and the access permissions that the VMID will have to the memory to be
+ * allocated.
+ * @nr_acl_entries: The number of ACL entries in @acl_list.
+ * @src_mem_type: The type of memory that the source VM should allocate from.
+ * This should be one of the mem_buf_mem_type enum values.
+ * @src_data: A pointer to data that the source VM should interpret when
+ * performing the allocation.
+ * @dst_mem_type: The type of memory that the destination VM should treat the
+ * incoming allocation from the source VM as. This should be one of the
+ * mem_buf_mem_type enum values.
+ * @mem_buf_fd: A file descriptor representing the memory that was allocated
+ * from the source VM and added to the current VM. Calling close() on this file
+ * descriptor will deallocate the memory from the current VM, and return it
+ * to the source VM.
+ * * @dst_data: A pointer to data that the destination VM should interpret when
+ * adding the memory to the current VM.
  *
- * NOTE: Certain memory types require additional information for the remote VM
- * to interpret. That information should be concatenated with this structure
- * prior to sending the allocation request to the remote VM. For example,
- * with memory type ION, the allocation request message will consist of this
- * structure, as well as the mem_buf_ion_alloc_data structure.
+ * All reserved fields must be zeroed out by the caller prior to invoking the
+ * allocation IOCTL command with this argument.
  */
-struct mem_buf_alloc_req {
-	struct mem_buf_msg_hdr hdr;
-	u64 size;
-	u32 src_mem_type;
-	struct gh_acl_desc acl_desc;
-} __packed;
-
-/**
- * struct mem_buf_ion_alloc_data: Represents the data needed to perform
- * an ION allocation on a remote VM.
- * @heap_id: The ID of the heap to allocate from
- */
-struct mem_buf_ion_alloc_data {
-	u32 heap_id;
-} __packed;
-
-/**
- * struct mem_buf_alloc_resp: The message format for a memory allocation
- * request response.
- * @hdr: Message header
- * @ret: Return code from remote VM
- * @hdl: The memparcel handle associated with the memory allocated to the
- * receiving VM. This field is only meaningful if the allocation on the remote
- * VM was carried out successfully, as denoted by @ret.
- */
-struct mem_buf_alloc_resp {
-	struct mem_buf_msg_hdr hdr;
-	s32 ret;
-	u32 hdl;
-} __packed;
-
-/**
- * struct mem_buf_alloc_relinquish: The message format for a notification
- * that the current VM has relinquished access to the memory lent to it by
- * another VM.
- * @hdr: Message header
- * @hdl: The memparcel handle associated with the memory.
- */
-struct mem_buf_alloc_relinquish {
-	struct mem_buf_msg_hdr hdr;
-	u32 hdl;
-} __packed;
-
-/* Public definitions */
-
-/* Used to obtain the underlying vmperm struct of a DMA-BUF */
-struct mem_buf_vmperm *to_mem_buf_vmperm(struct dma_buf *dmabuf);
-
-/* Returns true if the local VM has exclusive access and is the owner */
-bool mem_buf_dma_buf_exclusive_owner(struct dma_buf *dmabuf);
-
-/*
- * Returns a copy of the Virtual Machine vmids & permissions of the dmabuf.
- * The caller must kfree() when finished.
- */
-int mem_buf_dma_buf_copy_vmperm(struct dma_buf *dmabuf, int **vmids, int **perms,
-		int *nr_acl_entries);
-
-typedef int (*mem_buf_dma_buf_destructor)(void *dtor_data);
-int mem_buf_dma_buf_set_destructor(struct dma_buf *dmabuf,
-				   mem_buf_dma_buf_destructor dtor,
-				   void *dtor_data);
-
-/**
- * struct mem_buf_allocation_data - Data structure that contains information
- * about a memory buffer allocation request.
- * @size: The size (in bytes) of the memory to be requested from a remote VM
- * @nr_acl_entries: The number of ACL entries in @acl_list
- * @acl_list: A list of VMID and permission pairs that describe what VMIDs will
- * have access to the memory, and with what permissions
- * @src_mem_type: The type of memory that the remote VM should allocate
- * (e.g. ION memory)
- * @src_data: A pointer to memory type specific data that the remote VM may need
- * when performing an allocation (e.g. ION memory allocations require a heap ID)
- * @dst_mem_type: The type of memory that the native VM wants (e.g. ION memory)
- * @dst_data: A pointer to memory type specific data that the native VM may
- * need when adding the memory from the remote VM (e.g. ION memory requires a
- * heap ID to add the memory to).
- */
-struct mem_buf_allocation_data {
-	size_t size;
-	unsigned int nr_acl_entries;
-	int *vmids;
-	int *perms;
-	enum mem_buf_mem_type src_mem_type;
-	void *src_data;
-	enum mem_buf_mem_type dst_mem_type;
-	void *dst_data;
+struct mem_buf_alloc_ioctl_arg {
+	__u64 size;
+	__u64 acl_list;
+	__u32 nr_acl_entries;
+	__u32 src_mem_type;
+	__u64 src_data;
+	__u32 dst_mem_type;
+	__u32 mem_buf_fd;
+	__u64 dst_data;
+	__u64 reserved0;
+	__u64 reserved1;
+	__u64 reserved2;
 };
 
-struct mem_buf_lend_kernel_arg {
-	unsigned int nr_acl_entries;
-	int *vmids;
-	int *perms;
-	gh_memparcel_handle_t memparcel_hdl;
-	u32 flags;
-	u64 label;
-};
+#define MEM_BUF_IOC_ALLOC		_IOWR(MEM_BUF_IOC_MAGIC, 0,\
+					      struct mem_buf_alloc_ioctl_arg)
 
-int mem_buf_lend(struct dma_buf *dmabuf,
-		struct mem_buf_lend_kernel_arg *arg);
-
-/*
- * mem_buf_share
- * Grant the local VM, as well as one or more remote VMs access
- * to the dmabuf. The permissions of the local VM default to RWX
- * unless otherwise specified.
+/**
+ * struct mem_buf_lend_ioctl_arg: A request to lend memory from the local VM
+ * VM to one or more remote VMs.
+ * @dma_buf_fd: The fd of the dma-buf that will be exported to another VM.
+ * @nr_acl_entries: The number of ACL entries in @acl_list.
+ * @acl_list: An array of structures, where each structure specifies a VMID
+ * and the access permissions that the VMID will have to the memory to be
+ * exported. Must not include the local VMID.
+ * @memparcel_hdl: The handle associated with the memparcel that was created by
+ * granting access to the dma-buf for the VMIDs specified in @acl_list.
+ *
+ * All reserved fields must be zeroed out by the caller prior to invoking the
+ * import IOCTL command with this argument.
  */
-int mem_buf_share(struct dma_buf *dmabuf,
-		struct mem_buf_lend_kernel_arg *arg);
-
-
-struct mem_buf_retrieve_kernel_arg {
-	u32 sender_vmid;
-	unsigned int nr_acl_entries;
-	int *vmids;
-	int *perms;
-	gh_memparcel_handle_t memparcel_hdl;
-	int fd_flags;
+struct mem_buf_lend_ioctl_arg {
+	__u32 dma_buf_fd;
+	__u32 nr_acl_entries;
+	__u64 acl_list;
+	__u64 memparcel_hdl;
+	__u64 reserved0;
+	__u64 reserved1;
+	__u64 reserved2;
 };
-struct dma_buf *mem_buf_retrieve(struct mem_buf_retrieve_kernel_arg *arg);
-int mem_buf_reclaim(struct dma_buf *dmabuf);
 
-#if IS_ENABLED(CONFIG_QCOM_MEM_BUF)
+#define MEM_BUF_IOC_LEND		_IOWR(MEM_BUF_IOC_MAGIC, 3,\
+					      struct mem_buf_lend_ioctl_arg)
 
-int mem_buf_get_fd(void *membuf_desc);
+#define MEM_BUF_VALID_FD_FLAGS (O_CLOEXEC | O_ACCMODE)
+/**
+ * struct mem_buf_retrieve_ioctl_arg: A request to retrieve memory from another
+ * VM as a dma-buf
+ * @sender_vm_fd: An open file descriptor identifing the VM who sent the handle.
+ * @nr_acl_entries: The number of ACL entries in @acl_list.
+ * @acl_list: An array of structures, where each structure specifies a VMID
+ * and the access permissions that the VMID should have for the memparcel.
+ * @memparcel_hdl: The handle that corresponds to the memparcel we are
+ * importing.
+ * @dma_buf_import_fd: A dma-buf file descriptor that the client can use to
+ * access the buffer. This fd must be closed to release the memory.
+ * @fd_flags:		file descriptor flags used when allocating
+ *
+ * All reserved fields must be zeroed out by the caller prior to invoking the
+ * import IOCTL command with this argument.
+ */
+struct mem_buf_retrieve_ioctl_arg {
+	__u32 sender_vm_fd;
+	__u32 nr_acl_entries;
+	__u64 acl_list;
+	__u64 memparcel_hdl;
+	__u32 dma_buf_import_fd;
+	__u32 fd_flags;
+	__u64 reserved0;
+	__u64 reserved1;
+	__u64 reserved2;
+};
 
-void mem_buf_put(void *membuf_desc);
+#define MEM_BUF_IOC_RETRIEVE		_IOWR(MEM_BUF_IOC_MAGIC, 4,\
+					      struct mem_buf_retrieve_ioctl_arg)
 
-void *mem_buf_get(int fd);
+/**
+ * struct mem_buf_reclaim_ioctl_arg: A request to reclaim memory from another
+ * VM. The other VM must have relinquished access, and the current VM must be
+ * the original owner of the memory. The dma-buf file will not be closed by
+ * this operation.
+ * @memparcel_hdl: The handle that corresponds to the memparcel we are
+ * reclaiming.
+ * @dma_buf_fd: A dma-buf file descriptor that the client can use to
+ * access the buffer.
+ *
+ * All reserved fields must be zeroed out by the caller prior to invoking the
+ * import IOCTL command with this argument.
+ */
+struct mem_buf_reclaim_ioctl_arg {
+	__u64 memparcel_hdl;
+	__u32 dma_buf_fd;
+	__u32 reserved0;
+	__u64 reserved1;
+	__u64 reserved2;
+};
 
-#else
+#define MEM_BUF_IOC_RECLAIM		_IOWR(MEM_BUF_IOC_MAGIC, 3,\
+					      struct mem_buf_reclaim_ioctl_arg)
 
-static inline int mem_buf_get_fd(void *membuf_desc)
-{
-	return -ENODEV;
-}
+/**
+ * struct mem_buf_share_ioctl_arg: An request to share memory between the
+ * local VM and one or more remote VMs.
+ * @dma_buf_fd: The fd of the dma-buf that will be exported to another VM.
+ * @nr_acl_entries: The number of ACL entries in @acl_list.
+ * @acl_list: An array of structures, where each structure specifies a VMID
+ * and the access permissions that the VMID will have to the memory to be
+ * exported. Must include the local VMID.
+ * @memparcel_hdl: The handle associated with the memparcel that was created by
+ * granting access to the dma-buf for the VMIDs specified in @acl_list.
+ *
+ * All reserved fields must be zeroed out by the caller prior to invoking the
+ * import IOCTL command with this argument.
+ */
+struct mem_buf_share_ioctl_arg {
+	__u32 dma_buf_fd;
+	__u32 nr_acl_entries;
+	__u64 acl_list;
+	__u64 memparcel_hdl;
+	__u64 reserved0;
+	__u64 reserved1;
+	__u64 reserved2;
+};
 
-static inline void mem_buf_put(void *membuf_desc)
-{
-}
+#define MEM_BUF_IOC_SHARE		_IOWR(MEM_BUF_IOC_MAGIC, 6,\
+					      struct mem_buf_share_ioctl_arg)
 
-static inline void *mem_buf_get(int fd)
-{
-	return ERR_PTR(-ENODEV);
-}
+/**
+ * struct mem_buf_exclusive_owner_ioctl_arg: A request to see if a DMA-BUF
+ * is owned by and belongs exclusively to this VM.
+ * @dma_buf_fd: The fd of the dma-buf the user wants to obtain information on
+ * @is_exclusive_owner:
+ */
+struct mem_buf_exclusive_owner_ioctl_arg {
+	__u32 dma_buf_fd;
+	__u32 is_exclusive_owner;
+};
 
-#endif /* CONFIG_QCOM_MEM_BUF */
-#endif /* _MEM_BUF_H */
+#define MEM_BUF_IOC_EXCLUSIVE_OWNER	_IOWR(MEM_BUF_IOC_MAGIC, 2,\
+					      struct mem_buf_exclusive_owner_ioctl_arg)
+
+#endif /* _LINUX_MEM_BUF_H */
